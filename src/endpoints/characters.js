@@ -14,7 +14,7 @@ import storage from 'node-persist';
 
 import { AVATAR_WIDTH, AVATAR_HEIGHT, DEFAULT_AVATAR_PATH } from '../constants.js';
 import { default as validateAvatarUrlMiddleware, getFileNameValidationFunction, forbiddenRegExp } from '../middleware/validateFileName.js';
-import { deepMerge, humanizedDateTime, tryParse, MemoryLimitedMap, getConfigValue, mutateJsonString, clientRelativePath, getUniqueName, sanitizeSafeCharacterReplacements } from '../util.js';
+import { deepMerge, humanizedDateTime, tryParse, MemoryLimitedMap, getConfigValue, mutateJsonString, clientRelativePath, getUniqueName, sanitizeSafeCharacterReplacements, getArrayBufferSlice } from '../util.js';
 import { TavernCardValidator } from '../validator/TavernCardValidator.js';
 import { parse, read, write } from '../character-card-parser.js';
 import { readWorldInfoFile } from './worldinfo.js';
@@ -765,7 +765,7 @@ async function importFromYaml(uploadPath, context, preservedFileName) {
 async function importFromCharX(uploadPath, { request }, preservedFileName) {
     const fileBuffer = fs.readFileSync(uploadPath);
     // Create a properly-sized ArrayBuffer (Node's buffer pool can cause oversized .buffer)
-    const data = fileBuffer.buffer.slice(fileBuffer.byteOffset, fileBuffer.byteOffset + fileBuffer.byteLength);
+    const data = getArrayBufferSlice(fileBuffer);
     fs.unlinkSync(uploadPath);
 
     const parser = new CharXParser(data);
@@ -801,7 +801,7 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
 }
 
 async function importFromByaf(uploadPath, { request }, preservedFileName) {
-    const data = (await fsPromises.readFile(uploadPath)).buffer;
+    const data = getArrayBufferSlice(await fsPromises.readFile(uploadPath));
     await fsPromises.unlink(uploadPath);
     console.info('Importing from BYAF');
 
@@ -852,12 +852,13 @@ async function importFromByaf(uploadPath, { request }, preservedFileName) {
             card.chat = path.basename(chats[0], path.extname(chats[0]));
         }
 
-        // Save alternate icons for the character.
-        for (const icon of byafData.images.slice(1)) {
+        // Save alternate icons for the character. They need a folder named after the character.
+        const altImagesName = sanitize(card.name);
+        for (const icon of altImagesName ? byafData.images.slice(1) : []) {
             // BYAF does not support character expressions, so using the same structure will not result in conflicts,
             // even if the expression system did not tolerate additional icons that are not mapped to expressions.
             // This will not yet allow changing icons within the UI but at least the icons will be available for manual selection, rather than being lost.
-            const altImagesFolder = path.join(request.user.directories.characters, sanitize(card.name));
+            const altImagesFolder = path.join(request.user.directories.characters, altImagesName);
             if (!fs.existsSync(altImagesFolder)) fs.mkdirSync(altImagesFolder, { recursive: true });
             const extension = path.extname(icon.filename) || '.png';
             const file = getUniqueName(`${sanitize(icon.label, { replacement: sanitizeSafeCharacterReplacements }) || 'alt'}`, (name) => fs.existsSync(path.join(altImagesFolder, `${name}${extension}`)));
@@ -1081,7 +1082,9 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
 
         // Rename chats folder
         if (fs.existsSync(oldChatsPath) && !fs.existsSync(newChatsPath)) {
-            fs.cpSync(oldChatsPath, newChatsPath, { recursive: true });
+            // Supplying a filter avoids a Node.js Windows copyDir crash while preserving all entries.
+            // https://github.com/nodejs/node/issues/63970
+            fs.cpSync(oldChatsPath, newChatsPath, { recursive: true, filter: () => true });
             fs.rmSync(oldChatsPath, { recursive: true, force: true });
         }
 
